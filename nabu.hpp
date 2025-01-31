@@ -7,6 +7,9 @@
 
 #include <bestd/variant.hpp>
 #include <bestd/optional.hpp>
+#include <bestd/tuple.hpp>
+
+namespace nabu {
 
 // Proxy instantiation for functions
 #define hacked(T) *reinterpret_cast <T *> ((void *) nullptr)
@@ -97,11 +100,11 @@ struct lexer_group {
 		"lexers in lexer_group(...) "
 		"must produce distinct types");
 
+	std::tuple <Fs...> fs;
+
 	// TODO: variant...
 	using element_t = bestd::variant <typename optional_returner <Fs> ::result...>;
 	using result_t = std::vector <element_t>;
-
-	std::tuple <Fs...> fs;
 
 	lexer_group(const Fs &... fs_) : fs(fs_...) {}
 
@@ -164,7 +167,7 @@ concept parser_fn = optional_returner_v <F>
 
 template <typename Token, parser_fn <Token> ... Fs>
 struct parser_chain {
-	using result_t = std::tuple <typename optional_returner <Fs> ::result...>;
+	using result_t = bestd::tuple <typename optional_returner <Fs> ::result...>;
 
 	std::tuple <Fs...> fs;
 
@@ -198,6 +201,69 @@ struct parser_chain {
 		}
 
 		return result;
+	}
+};
+
+// Parser options should all return the same type
+template <typename T, typename... Rest>
+constexpr bool all_same()
+{
+	return (std::is_same_v <T, Rest> || ...);
+}
+
+template <typename Token, parser_fn <Token> ... Fs>
+constexpr bool valid_parser_options()
+{
+	return all_same <typename optional_returner <Fs> ::result...> ();
+}
+
+template <typename Token, parser_fn <Token> ... Fs>
+requires (sizeof...(Fs) > 0)
+struct parser_options {
+	static_assert(valid_parser_options <Token, Fs...> (),
+		"parsers in paser_options(...) "
+		"must produce identical types");
+	
+	std::tuple <Fs...> fs;
+
+	// TODO: try to extend to multivariant
+	using F0 = std::tuple_element_t <0, decltype(fs)>;
+	using result_t = typename optional_returner <F0> ::result;
+	
+	parser_options(const Fs &... fs_) : fs(fs_...) {}
+	
+	template <size_t I>
+	bool eval_i(result_t &result, const std::vector <Token> &tokens, size_t &i) const {
+		size_t old = i;
+
+		if constexpr (I >= sizeof...(Fs)) {
+			return false;
+		} else {
+			auto fv = std::get <I> (fs)(tokens, i);
+			if (fv) {
+				auto fvv = fv.value();
+
+				using T = decltype(fvv);
+				if (!std::is_same_v <std::decay_t <T>, null>)
+					result = fv.value();
+
+				return true;
+			}
+
+			// Reset for the next case...
+			i = old;
+
+			return eval_i <I + 1> (result, tokens, i);
+		}
+	}
+
+	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
+		result_t result;
+
+		if (eval_i <0> (result, tokens, i))
+			return result;
+
+		return std::nullopt;
 	}
 };
 
@@ -250,7 +316,6 @@ bestd::optional <T> parse_token(const std::vector <Token> &tokens, size_t &i)
 	return tokens[i++].template as <T> ();
 }
 
-
 // Token 'namespace'-d operations for syntactic sugar
 template <typename Token>
 struct TokenParser {
@@ -282,6 +347,11 @@ struct TokenParser {
 	static auto chain(const Fs &... fs) {
 		return chain(singlet_promoter <Fs> ::value(fs)...);
 	}
+	
+	template <parser_fn <Token> ... Fs>
+	static auto options(const Fs &... fs) {
+		return parser_options <Token, decltype(std::function(hacked(Fs)))...> (std::function(fs)...);
+	}
 
 	template <bool EmptyOk, typename F, typename D>
 	static auto loop(const F &f, const D &d) {
@@ -290,3 +360,5 @@ struct TokenParser {
 		return parser_loop <Token, decltype(ff), EmptyOk, decltype(fd)> (ff, fd);
 	}
 };
+
+}
