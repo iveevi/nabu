@@ -6,6 +6,7 @@
 #include <string>
 
 #include <bestd/variant.hpp>
+#include <bestd/optional.hpp>
 
 // Proxy instantiation for functions
 #define hacked(T) *reinterpret_cast <T *> ((void *) nullptr)
@@ -19,7 +20,7 @@ template <typename F>
 struct optional_returner : std::false_type {};
 
 template <typename R, typename ... Args>
-struct optional_returner <std::function <std::optional <R> (Args...)>> : std::true_type {
+struct optional_returner <std::function <bestd::optional <R> (Args...)>> : std::true_type {
 	using result = R;
 };
 
@@ -39,7 +40,7 @@ struct string_literal {
 };
 
 template <size_t N>
-std::optional <std::string> raw_expanded(const string_literal <N> &raw, const std::string &source, size_t &i)
+bestd::optional <std::string> raw_expanded(const string_literal <N> &raw, const std::string &source, size_t &i)
 {
 	for (size_t n = 0; n < N - 1; n++) {
 		if (source[n + i] != raw.value[n])
@@ -52,7 +53,7 @@ std::optional <std::string> raw_expanded(const string_literal <N> &raw, const st
 }
 
 template <string_literal s, typename T>
-std::optional <T> raw(const std::string &source, size_t &i)
+bestd::optional <T> raw(const std::string &source, size_t &i)
 {
 	if (auto r = raw_expanded(s, source, i)) {
 		if constexpr (std::is_constructible_v <T, std::string>)
@@ -97,7 +98,7 @@ struct lexer_group {
 		"must produce distinct types");
 
 	// TODO: variant...
-	using element_t = variant <typename optional_returner <Fs> ::result...>;
+	using element_t = bestd::variant <typename optional_returner <Fs> ::result...>;
 	using result_t = std::vector <element_t>;
 
 	std::tuple <Fs...> fs;
@@ -131,7 +132,7 @@ struct lexer_group {
 		}
 	}
 
-	std::optional <result_t> operator()(const std::string &s, size_t &i) const {
+	bestd::optional <result_t> operator()(const std::string &s, size_t &i) const {
 		size_t old = i;
 
 		result_t result;
@@ -187,7 +188,7 @@ struct parser_chain {
 		}
 	}
 
-	std::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
+	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
 		size_t c = i;
 		result_t result;
 
@@ -215,7 +216,7 @@ struct parser_loop <Token, F, EmptyOk, D> {
 
 	parser_loop(const F &f_, const D &d_) : f(f_), d(d_) {}
 
-	std::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
+	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
 		size_t c = i;
 		result_t result;
 
@@ -241,7 +242,7 @@ struct parser_loop <Token, F, EmptyOk, D> {
 
 template <typename Token, typename T>
 requires (Token::template type_index <T> () >= 0)
-std::optional <T> parse_token(const std::vector <Token> &tokens, size_t &i)
+bestd::optional <T> parse_token(const std::vector <Token> &tokens, size_t &i)
 {
 	if (!tokens[i].template is <T> ())
 		return std::nullopt;
