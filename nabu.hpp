@@ -361,4 +361,46 @@ struct TokenParser {
 	}
 };
 
+template <typename T, size_t ... Is, typename A>
+T __construct(const A &arg)
+{
+	if constexpr (sizeof...(Is) > 0)
+		return T(arg);
+	else
+		return T();
+}
+
+// Utilities for functional approach
+template <typename T, size_t ... Is, typename ... Args>
+T __construct(const bestd::tuple <Args...> &arg)
+{
+	return T(std::get <Is> (arg)...);
+}
+
+template <typename T, size_t ... Is>
+auto construct = [](const auto &arg)
+{
+	return __construct <T, Is...> (arg);
+};
+
+template <typename T, size_t ... Is>
+auto feed_construct = [](const auto &arg)
+{
+	return arg.feed(construct <T, Is...>);
+};
+
+template <typename F, typename G>
+constexpr auto compose(const F &f, const G &g)
+{
+	return [f, g](auto &&... args) -> decltype(auto) {
+        	return std::invoke(f, std::invoke(g, std::forward <decltype(args)> (args)...));
+	};
+}
+
+template <typename T, size_t ... Is, typename G>
+constexpr auto constructor(const G &g)
+{
+	return compose(feed_construct <T, Is...>, g);
+}
+
 }
