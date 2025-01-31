@@ -7,18 +7,24 @@
 
 #include <bestd/variant.hpp>
 
+// Proxy instantiation for functions
+#define hacked(T) *reinterpret_cast <T *> ((void *) nullptr)
+
+template <typename T>
+concept invocable = requires(const T &t) {
+	{ std::function(t) };
+};
+
 template <typename F>
-struct __optional_returner : std::false_type {};
+struct optional_returner : std::false_type {};
 
 template <typename R, typename ... Args>
-struct __optional_returner <std::function <std::optional <R> (Args...)>> : std::true_type {
+struct optional_returner <std::function <std::optional <R> (Args...)>> : std::true_type {
 	using result = R;
 };
 
-#define hacked(T) *reinterpret_cast <T *> ((void *) nullptr)
-
-template <typename F>
-using optional_returner = __optional_returner <decltype(std::function(hacked(F)))>;
+template <invocable F>
+struct optional_returner <F> : optional_returner <decltype(std::function(hacked(F)))> {};
 
 template <typename F>
 constexpr bool optional_returner_v = optional_returner <F> ::value;
@@ -57,6 +63,9 @@ std::optional <T> raw(const std::string &source, size_t &i)
 
 	return std::nullopt;
 }
+
+// Reserved type for no values
+struct null {};
 
 template <typename F>
 concept lexer_fn = optional_returner_v <F>
@@ -99,14 +108,24 @@ struct lexer_group {
 
 	template <size_t I>
 	bool eval_i(result_t &result, const std::string &source, size_t &i) const {
+		size_t old = i;
+
 		if constexpr (I >= sizeof...(Fs)) {
 			return false;
 		} else {
 			auto fv = std::get <I> (fs)(source, i);
 			if (fv) {
-				result.push_back(fv.value());
+				auto fvv = fv.value();
+
+				using T = decltype(fvv);
+				if (!std::is_same_v <std::decay_t <T>, null>)
+					result.push_back(fv.value());
+
 				return true;
 			}
+
+			// Reset for the next case...
+			i = old;
 
 			return eval_i <I + 1> (result, source, i);
 		}
@@ -173,7 +192,7 @@ struct parser_chain {
 		result_t result;
 
 		if (!eval_i <0> (result, tokens, i)) {
-			c = i;
+			i = c;
 			return std::nullopt;
 		}
 
@@ -239,15 +258,34 @@ struct TokenParser {
 		return parse_token <Token, T> (tokens, i);
 	}
 
+	template <typename T>
+	struct singlet_promoter {
+		static auto value(const T &) {
+			return singlet <T>;
+		}
+	};
+	
+	template <parser_fn <Token> F>
+	struct singlet_promoter <F> {
+		static auto value(const F &f) {
+			return f;
+		}
+	};
+
 	template <parser_fn <Token> ... Fs>
 	static auto chain(const Fs &... fs) {
 		return parser_chain <Token, decltype(std::function(hacked(Fs)))...> (std::function(fs)...);
 	}
+	
+	template <typename ... Fs>
+	static auto chain(const Fs &... fs) {
+		return chain(singlet_promoter <Fs> ::value(fs)...);
+	}
 
-	template <bool EmptyOk, parser_fn <Token> F, parser_fn <Token> D>
+	template <bool EmptyOk, typename F, typename D>
 	static auto loop(const F &f, const D &d) {
-		auto ff = std::function(f);
-		auto fd = std::function(d);
+		auto ff = std::function(singlet_promoter <F> ::value(f));
+		auto fd = std::function(singlet_promoter <D> ::value(d));
 		return parser_loop <Token, decltype(ff), EmptyOk, decltype(fd)> (ff, fd);
 	}
 };
