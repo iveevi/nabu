@@ -1,0 +1,3 @@
+[submodule "bestd"]
+	path = bestd
+	url = https://github.com/iveevi/bestd.git
