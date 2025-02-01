@@ -107,7 +107,7 @@ struct lexer_group {
 		"lexers in lexer_group(...) "
 		"must produce distinct types");
 
-	std::tuple <Fs...> fs;
+	std::tuple <const Fs &...> fs;
 
 	// TODO: variant...
 	using element_t = bestd::variant <typename optional_returner <Fs> ::result...>;
@@ -159,9 +159,9 @@ struct lexer_group {
 };
 
 template <lexer_fn ... Fs>
-auto lexer(const Fs &... args)
+auto lexer(Fs &... args)
 {
-	return lexer_group(std::function(args)...);
+	return lexer_group(args...);
 }
 
 template <typename F, typename T>
@@ -176,9 +176,9 @@ template <typename Token, parser_fn <Token> ... Fs>
 struct parser_chain {
 	using result_t = bestd::tuple <typename optional_returner <Fs> ::result...>;
 
-	std::tuple <Fs...> fs;
+	std::tuple <Fs &...> fs;
 
-	parser_chain(const Fs &... fs_) : fs(fs_...) {}
+	parser_chain(Fs &... fs_) : fs(fs_...) {}
 
 	template <size_t I>
 	bool eval_i(result_t &result, const std::vector <Token> &tokens, size_t &i) const {
@@ -231,13 +231,13 @@ struct parser_options {
 		"parsers in paser_options(...) "
 		"must produce identical types");
 	
-	std::tuple <Fs...> fs;
+	std::tuple <Fs &...> fs;
 
 	// TODO: try to extend to multivariant
 	using F0 = std::tuple_element_t <0, decltype(fs)>;
-	using result_t = typename optional_returner <F0> ::result;
+	using result_t = typename optional_returner <std::decay_t <F0>> ::result;
 	
-	parser_options(const Fs &... fs_) : fs(fs_...) {}
+	parser_options(Fs &... fs_) : fs(fs_...) {}
 	
 	template <size_t I>
 	bool eval_i(result_t &result, const std::vector <Token> &tokens, size_t &i) const {
@@ -284,10 +284,10 @@ template <typename Token, parser_fn <Token> F, bool EmptyOk, parser_fn <Token> D
 struct parser_loop <Token, F, EmptyOk, D> {
 	using result_t = std::vector <typename optional_returner <F> ::result>;
 
-	F f;
-	D d;
+	F &f;
+	D &d;
 
-	parser_loop(const F &f_, const D &d_) : f(f_), d(d_) {}
+	parser_loop(F &f_, D &d_) : f(f_), d(d_) {}
 
 	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
 		size_t c = i;
@@ -326,45 +326,35 @@ bestd::optional <T> parse_token(const std::vector <Token> &tokens, size_t &i)
 // Token 'namespace'-d operations for syntactic sugar
 template <typename Token>
 struct TokenParser {
+	// Automatic allocation of intermediates
 	template <typename T>
-	static auto singlet(const std::vector <Token> &tokens, size_t &i) {
-		return parse_token <Token, T> (tokens, i);
-	}
+	static inline std::vector <std::function <bestd::optional <T> (const std::vector <Token> &, size_t &)>> allocated;
 
 	template <typename T>
-	struct singlet_promoter {
-		static auto value(const T &) {
-			return singlet <T>;
-		}
-	};
+	static constexpr auto singlet = parse_token <Token, T>;
 	
-	template <parser_fn <Token> F>
-	struct singlet_promoter <F> {
-		static auto value(const F &f) {
-			return f;
-		}
-	};
-
 	template <parser_fn <Token> ... Fs>
-	static auto chain(const Fs &... fs) {
-		return parser_chain <Token, decltype(std::function(hacked(Fs)))...> (std::function(fs)...);
-	}
-	
-	template <typename ... Fs>
-	static auto chain(const Fs &... fs) {
-		return chain(singlet_promoter <Fs> ::value(fs)...);
+	static auto &chain(Fs &... fs) {
+		auto p = parser_chain <Token, Fs...> (fs...);
+		using result_t = decltype(p)::result_t;
+		allocated <result_t> .emplace_back(p);
+		return allocated <result_t> .back();
 	}
 	
 	template <parser_fn <Token> ... Fs>
-	static auto options(const Fs &... fs) {
-		return parser_options <Token, decltype(std::function(hacked(Fs)))...> (std::function(fs)...);
+	static auto &options(Fs &... fs) {
+		auto p = parser_options <Token, Fs...> (fs...);
+		using result_t = decltype(p)::result_t;
+		allocated <result_t> .emplace_back(p);
+		return allocated <result_t> .back();
 	}
 
-	template <bool EmptyOk, typename F, typename D>
-	static auto loop(const F &f, const D &d) {
-		auto ff = std::function(singlet_promoter <F> ::value(f));
-		auto fd = std::function(singlet_promoter <D> ::value(d));
-		return parser_loop <Token, decltype(ff), EmptyOk, decltype(fd)> (ff, fd);
+	template <bool EmptyOk, parser_fn <Token> F, parser_fn <Token> D>
+	static auto &loop(F &f, D &d) {
+		auto p = parser_loop <Token, F, EmptyOk, D> (f, d);
+		using result_t = decltype(p)::result_t;
+		allocated <result_t> .emplace_back(p);
+		return allocated <result_t> .back();
 	}
 };
 
