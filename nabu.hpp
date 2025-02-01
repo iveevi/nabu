@@ -69,7 +69,14 @@ bestd::optional <T> raw(const std::string &source, size_t &i)
 }
 
 // Reserved type for no values
+template <size_t = 0>
 struct null {};
+
+template <typename T>
+struct is_null : std::false_type {};
+
+template <size_t I>
+struct is_null <null <I>> : std::true_type {};
 
 template <typename F>
 concept lexer_fn = optional_returner_v <F>
@@ -122,7 +129,7 @@ struct lexer_group {
 				auto fvv = fv.value();
 
 				using T = decltype(fvv);
-				if (!std::is_same_v <std::decay_t <T>, null>)
+				if (!is_null <T> ::value)
 					result.push_back(fv.value());
 
 				return true;
@@ -244,7 +251,7 @@ struct parser_options {
 				auto fvv = fv.value();
 
 				using T = decltype(fvv);
-				if (!std::is_same_v <std::decay_t <T>, null>)
+				if (!is_null <T> ::value)
 					result = fv.value();
 
 				return true;
