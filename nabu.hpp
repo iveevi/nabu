@@ -352,15 +352,13 @@ struct options_group {
 };
 
 // Loops of parsers
-template <bestd::is_variant Token, parser_fn <Token> F, parser_fn <Token> D>
+template <bestd::is_variant Token, parser_fn <Token> F, typename D, bool EmptyOk>
 struct loop_group {
 	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
 
 	template <auto f, auto d>
 	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
 	static bestd::optional <loop_result_t> loop(const std::vector <Token> &tokens, size_t &i) {
-		static constexpr bool EmptyOk = true;
-
 		size_t old = i;
 
 		loop_result_t result;
@@ -368,15 +366,48 @@ struct loop_group {
 		while (true) {
 			auto fv = signature <F> ::template replica <f> (tokens, i);
 			if (!fv) {
-				if (result.empty() && EmptyOk)
-					break;
+				if (result.empty() && !EmptyOk) {
+					i = old;
+					return std::nullopt;
+				}
 
-				i = old;
-				return std::nullopt;
+				break;
+			}
+
+			result.push_back(fv.value());
+			
+			// No delimeter
+		}
+
+		return result;
+	}
+};
+
+template <bestd::is_variant Token, parser_fn <Token> F, parser_fn <Token> D, bool EmptyOk>
+struct loop_group <Token, F, D, EmptyOk> {
+	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
+
+	template <auto f, auto d>
+	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
+	static bestd::optional <loop_result_t> loop(const std::vector <Token> &tokens, size_t &i) {
+		size_t old = i;
+
+		loop_result_t result;
+
+		while (true) {
+			auto fv = signature <F> ::template replica <f> (tokens, i);
+			if (!fv) {
+				if (result.empty() && !EmptyOk) {
+					i = old;
+					return std::nullopt;
+				}
+
+				break;
 			}
 
 			result.push_back(fv.value());
 
+			// With delimeter
 			auto dv = signature <D> ::template replica <d> (tokens, i);
 			if (!dv)
 				break;
@@ -392,8 +423,8 @@ auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
 template <bestd::is_variant Token, auto ... fs>
 auto &options = options_group <Token, decltype(fs)...> ::template options <fs...>;
 
-template <bestd::is_variant Token, auto f, auto d>
-auto &loop = loop_group <Token, decltype(f), decltype(d)> ::template loop <f, d>;
+template <bestd::is_variant Token, auto f, auto d, bool e>
+auto &loop = loop_group <Token, decltype(f), decltype(d), e> ::template loop <f, d>;
 
 template <typename R, typename I, size_t ... Is>
 bestd::optional <R> transform(const bestd::optional <I> &r)
@@ -440,8 +471,8 @@ using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &
 	template <auto ... fs>					\
 	auto &options = nabu::options <Token, fs...>;		\
 								\
-	template <auto f, auto d>				\
-	auto &loop = nabu::loop <Token, f, d>;			\
+	template <auto f, auto d, bool b>			\
+	auto &loop = nabu::loop <Token, f, d, b>;		\
 								\
 	template <auto f, typename T, size_t ... Is>		\
 	auto &convert = nabu::convert <f, T, Is...>;		\
