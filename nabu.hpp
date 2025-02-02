@@ -15,7 +15,7 @@ namespace nabu {
 template <typename T>
 struct signature : std::false_type {};
 
-// Function handles
+// Function handles :)
 template <typename R, typename ... Args>
 struct signature <R (Args...)> : std::true_type {
 	using result_t = R;
@@ -39,6 +39,7 @@ struct signature <R (Args...)> : std::true_type {
 	}
 };
 
+// Also function handles... :|
 template <typename R, typename ... Args>
 struct signature <R (*)(Args...)> : std::true_type {
 	using result_t = R;
@@ -62,7 +63,7 @@ struct signature <R (*)(Args...)> : std::true_type {
 	}
 };
 
-// Pointers to functions (for deferred definitions)
+// Pointers to functions (for deferred definitions) :>
 template <typename R, typename ... Args>
 struct signature <R (**)(Args...)> : std::true_type {
 	using result_t = R;
@@ -75,6 +76,30 @@ struct signature <R (**)(Args...)> : std::true_type {
 	}
 	
 	template <auto f, R (**g)(Args...)>
+	static auto feed(Args ... args) {
+		auto &fr = signature <decltype(f)> ::template replica <f>;
+		return fr((*g)(args...));
+	}
+
+	template <typename F>
+	static constexpr bool feedable() {
+		return std::is_invocable_v <F, R>;
+	}
+};
+
+// Reference to pointer to function... :(
+template <typename R, typename ... Args>
+struct signature <R (**&)(Args...)> : std::true_type {
+	using result_t = R;
+	
+	static auto accepts(Args ... args) {}
+
+	template <R (**&g)(Args...)>
+	static auto replica(Args ... args) {
+		return (*g)(args...);
+	}
+	
+	template <auto f, R (**&g)(Args...)>
 	static auto feed(Args ... args) {
 		auto &fr = signature <decltype(f)> ::template replica <f>;
 		return fr((*g)(args...));
@@ -242,11 +267,13 @@ auto lexer(Fs &... args)
 ///////////////////////
 
 template <typename F, typename Token>
-concept parser_fn = optional_returner <F> && requires(F f, const std::vector <Token> &tokens, size_t &i) {
+concept parser_fn = optional_returner <F>
+		&& bestd::is_variant <Token>
+		&& requires(F f, const std::vector <Token> &tokens, size_t &i) {
 	{ signature <F> ::accepts(tokens, i) };
 };
 
-template <typename Token, typename T>
+template <bestd::is_variant Token, typename T>
 requires (Token::template type_index <T> () >= 0)
 bestd::optional <T> singlet(const std::vector <Token> &tokens, size_t &i)
 {
@@ -257,7 +284,7 @@ bestd::optional <T> singlet(const std::vector <Token> &tokens, size_t &i)
 }
 
 // Sequences of parsers
-template <typename Token, parser_fn <Token> ... Fs>
+template <bestd::is_variant Token, parser_fn <Token> ... Fs>
 struct chain_group {
 	using chain_result_t = bestd::tuple <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	
@@ -290,7 +317,7 @@ struct chain_group {
 };
 
 // Options of parsers
-template <typename Token, parser_fn <Token> ... Fs>
+template <bestd::is_variant Token, parser_fn <Token> ... Fs>
 requires all_same <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>
 struct options_group {
 	using option_result_t = typename bestd::is_optional_base <typename signature <std::tuple_element_t <0, std::tuple <Fs...>>> ::result_t> ::inner_t;
@@ -325,7 +352,7 @@ struct options_group {
 };
 
 // Loops of parsers
-template <typename Token, parser_fn <Token> F, parser_fn <Token> D>
+template <bestd::is_variant Token, parser_fn <Token> F, parser_fn <Token> D>
 struct loop_group {
 	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
 
@@ -359,13 +386,13 @@ struct loop_group {
 	}
 };
 
-template <typename Token, auto ... fs>
+template <bestd::is_variant Token, auto ... fs>
 auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
 
-template <typename Token, auto ... fs>
+template <bestd::is_variant Token, auto ... fs>
 auto &options = options_group <Token, decltype(fs)...> ::template options <fs...>;
 
-template <typename Token, auto f, auto d>
+template <bestd::is_variant Token, auto f, auto d>
 auto &loop = loop_group <Token, decltype(f), decltype(d)> ::template loop <f, d>;
 
 template <typename R, typename I, size_t ... Is>
@@ -397,7 +424,7 @@ struct extension <F> {
 template <auto f, typename T, size_t ... Is>
 constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...>;
 	
-template <typename Token, typename T>
+template <bestd::is_variant Token, typename T>
 using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &);
 
 }
