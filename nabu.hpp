@@ -1,9 +1,9 @@
 #pragma once
 
-#include <functional>
-#include <optional>
 #include <algorithm>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <bestd/variant.hpp>
 #include <bestd/optional.hpp>
@@ -11,27 +11,100 @@
 
 namespace nabu {
 
-// Proxy instantiation for functions
-#define hacked(T) *reinterpret_cast <T *> ((void *) nullptr)
-
+// Space of acceptable functions
 template <typename T>
-concept invocable = requires(const T &t) {
-	{ std::function(t) };
-};
+struct signature : std::false_type {};
 
-template <typename F>
-struct optional_returner : std::false_type {};
+// Function handles
+template <typename R, typename ... Args>
+struct signature <R (Args...)> : std::true_type {
+	using result_t = R;
+	
+	static auto accepts(Args ... args) {}
+
+	template <R (*g)(Args...)>
+	static auto replica(Args ... args) {
+		return g(args...);
+	}
+	
+	template <auto f, R (*g)(Args...)>
+	static auto feed(Args ... args) {
+		auto &fr = signature <decltype(f)> ::template replica <f>;
+		return fr(g(args...));
+	}
+
+	template <typename F>
+	static constexpr bool feedable() {
+		return std::is_invocable_v <F, R>;
+	}
+};
 
 template <typename R, typename ... Args>
-struct optional_returner <std::function <bestd::optional <R> (Args...)>> : std::true_type {
-	using result = R;
+struct signature <R (*)(Args...)> : std::true_type {
+	using result_t = R;
+	
+	static auto accepts(Args ... args) {}
+
+	template <R (*g)(Args...)>
+	static auto replica(Args ... args) {
+		return g(args...);
+	}
+	
+	template <auto f, R (*g)(Args...)>
+	static auto feed(Args ... args) {
+		auto &fr = signature <decltype(f)> ::template replica <f>;
+		return fr(g(args...));
+	}
+
+	template <typename F>
+	static constexpr bool feedable() {
+		return std::is_invocable_v <F, R>;
+	}
 };
 
-template <invocable F>
-struct optional_returner <F> : optional_returner <decltype(std::function(hacked(F)))> {};
+// Pointers to functions (for deferred definitions)
+template <typename R, typename ... Args>
+struct signature <R (**)(Args...)> : std::true_type {
+	using result_t = R;
+	
+	static auto accepts(Args ... args) {}
+
+	template <R (**g)(Args...)>
+	static auto replica(Args ... args) {
+		return (*g)(args...);
+	}
+	
+	template <auto f, R (**g)(Args...)>
+	static auto feed(Args ... args) {
+		auto &fr = signature <decltype(f)> ::template replica <f>;
+		return fr((*g)(args...));
+	}
+
+	template <typename F>
+	static constexpr bool feedable() {
+		return std::is_invocable_v <F, R>;
+	}
+};
+
+template <typename T>
+concept invocable = signature <T> ::value;
+
+template <typename F, typename G>
+concept composable = invocable <F> && invocable <G> && (signature <G> ::template feedable <F> ());
+
+template <auto f, auto g>
+requires composable <decltype(f), decltype(g)>
+auto &compose = signature <decltype(g)> ::template feed <f, g>;
 
 template <typename F>
-constexpr bool optional_returner_v = optional_returner <F> ::value;
+concept optional_returner = invocable <F> && bestd::is_optional <typename signature <F> ::result_t>;
+
+template <typename T, typename... Rest>
+constexpr bool all_same = (sizeof...(Rest) == 0) || (std::is_same_v <T, Rest> || ...);
+
+//////////////////////
+// Lexing utilities //
+//////////////////////
 
 template <size_t N>
 struct string_literal {
@@ -79,7 +152,7 @@ template <size_t I>
 struct is_null <null <I>> : std::true_type {};
 
 template <typename F>
-concept lexer_fn = optional_returner_v <F>
+concept lexer_fn = optional_returner <F>
 		&& requires(const F &f,
 			    const std::string &source,
 			    size_t &i) {
@@ -98,7 +171,7 @@ constexpr bool has_duplicates()
 template <lexer_fn ... Fs>
 constexpr bool valid_lexer_group()
 {
-	return !has_duplicates <typename optional_returner <Fs> ::result...> ();
+	return !has_duplicates <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...> ();
 }
 
 template <lexer_fn ... Fs>
@@ -110,7 +183,7 @@ struct lexer_group {
 	std::tuple <const Fs &...> fs;
 
 	// TODO: variant...
-	using element_t = bestd::variant <typename optional_returner <Fs> ::result...>;
+	using element_t = bestd::variant <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	using result_t = std::vector <element_t>;
 
 	lexer_group(const Fs &... fs_) : fs(fs_...) {}
@@ -164,158 +237,18 @@ auto lexer(Fs &... args)
 	return lexer_group(args...);
 }
 
-template <typename F, typename T>
-concept parser_fn = optional_returner_v <F>
-		&& requires(const F &f,
-			    const std::vector <T> &tokens,
-			    size_t &i) {
-	{ f(tokens, i) };
-};
+///////////////////////
+// Parsing utilities //
+///////////////////////
 
-template <typename Token, parser_fn <Token> ... Fs>
-struct parser_chain {
-	using result_t = bestd::tuple <typename optional_returner <Fs> ::result...>;
-
-	std::tuple <Fs &...> fs;
-
-	parser_chain(Fs &... fs_) : fs(fs_...) {}
-
-	template <size_t I>
-	bool eval_i(result_t &result, const std::vector <Token> &tokens, size_t &i) const {
-		if constexpr (I >= sizeof...(Fs)) {
-			return true;
-		} else {
-			auto fv = std::get <I> (fs)(tokens, i);
-			if (!fv)
-				return false;
-
-			if (!eval_i <I + 1> (result, tokens, i))
-				return false;
-
-			std::get <I> (result) = fv.value();
-
-			return true;
-		}
-	}
-
-	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
-		size_t c = i;
-		result_t result;
-
-		if (!eval_i <0> (result, tokens, i)) {
-			i = c;
-			return std::nullopt;
-		}
-
-		return result;
-	}
-};
-
-// Parser options should all return the same type
-template <typename T, typename... Rest>
-constexpr bool all_same()
-{
-	return (std::is_same_v <T, Rest> || ...);
-}
-
-template <typename Token, parser_fn <Token> ... Fs>
-constexpr bool valid_parser_options()
-{
-	return all_same <typename optional_returner <Fs> ::result...> ();
-}
-
-template <typename Token, parser_fn <Token> ... Fs>
-requires (sizeof...(Fs) > 0)
-struct parser_options {
-	static_assert(valid_parser_options <Token, Fs...> (),
-		"parsers in paser_options(...) "
-		"must produce identical types");
-	
-	std::tuple <Fs &...> fs;
-
-	// TODO: try to extend to multivariant
-	using F0 = std::tuple_element_t <0, decltype(fs)>;
-	using result_t = typename optional_returner <std::decay_t <F0>> ::result;
-	
-	parser_options(Fs &... fs_) : fs(fs_...) {}
-	
-	template <size_t I>
-	bool eval_i(result_t &result, const std::vector <Token> &tokens, size_t &i) const {
-		size_t old = i;
-
-		if constexpr (I >= sizeof...(Fs)) {
-			return false;
-		} else {
-			auto fv = std::get <I> (fs)(tokens, i);
-			if (fv) {
-				auto fvv = fv.value();
-
-				using T = decltype(fvv);
-				if (!is_null <T> ::value)
-					result = fv.value();
-
-				return true;
-			}
-
-			// Reset for the next case...
-			i = old;
-
-			return eval_i <I + 1> (result, tokens, i);
-		}
-	}
-
-	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
-		result_t result;
-
-		if (eval_i <0> (result, tokens, i))
-			return result;
-
-		return std::nullopt;
-	}
-};
-
-template <typename Token, parser_fn <Token> F, bool EmptyOk, typename D = void>
-struct parser_loop {
-
-};
-
-// With a delimiter
-template <typename Token, parser_fn <Token> F, bool EmptyOk, parser_fn <Token> D>
-struct parser_loop <Token, F, EmptyOk, D> {
-	using result_t = std::vector <typename optional_returner <F> ::result>;
-
-	F &f;
-	D &d;
-
-	parser_loop(F &f_, D &d_) : f(f_), d(d_) {}
-
-	bestd::optional <result_t> operator()(const std::vector <Token> &tokens, size_t &i) const {
-		size_t c = i;
-		result_t result;
-
-		while (true) {
-			auto fv = f(tokens, i);
-			if (!fv) {
-				if (result.empty() && EmptyOk)
-					break;
-
-				i = c;
-				return std::nullopt;
-			}
-
-			result.push_back(fv.value());
-
-			if (!d(tokens, i))
-				break;
-		}
-
-		return result;
-	}
+template <typename F, typename Token>
+concept parser_fn = optional_returner <F> && requires(F f, const std::vector <Token> &tokens, size_t &i) {
+	{ signature <F> ::accepts(tokens, i) };
 };
 
 template <typename Token, typename T>
 requires (Token::template type_index <T> () >= 0)
-bestd::optional <T> parse_token(const std::vector <Token> &tokens, size_t &i)
+bestd::optional <T> singlet(const std::vector <Token> &tokens, size_t &i)
 {
 	if (!tokens[i].template is <T> ())
 		return std::nullopt;
@@ -323,81 +256,107 @@ bestd::optional <T> parse_token(const std::vector <Token> &tokens, size_t &i)
 	return tokens[i++].template as <T> ();
 }
 
-// Token 'namespace'-d operations for syntactic sugar
-template <typename Token>
-struct TokenParser {
-	// Automatic allocation of intermediates
-	template <typename T>
-	static inline std::vector <std::function <bestd::optional <T> (const std::vector <Token> &, size_t &)>> allocated;
-
-	template <typename T>
-	static constexpr auto singlet = parse_token <Token, T>;
+// Sequences of parsers
+template <typename Token, parser_fn <Token> ... Fs>
+struct chain_group {
+	using chain_result_t = bestd::tuple <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	
-	template <parser_fn <Token> ... Fs>
-	static auto &chain(Fs &... fs) {
-		auto p = parser_chain <Token, Fs...> (fs...);
-		using result_t = decltype(p)::result_t;
-		allocated <result_t> .emplace_back(p);
-		return allocated <result_t> .back();
+	template <size_t I, auto f, auto ... fs>
+	static bool chain_step(chain_result_t &result, const std::vector <Token> &tokens, size_t &i) {
+		auto fv = signature <decltype(f)> ::template replica <f> (tokens, i);
+		if (!fv)
+			return false;
+
+		std::get <I> (result) = fv.value();
+		if constexpr (sizeof...(fs) > 0)
+			return chain_step <I + 1, fs...> (result, tokens, i);
+
+		return true;
 	}
+
+	template <auto ... fs>
+	requires ((std::same_as <decltype(fs), Fs>) && ...)
+	static bestd::optional <chain_result_t> chain(const std::vector <Token> &tokens, size_t &i) {
+		size_t old = i;
+
+		chain_result_t result;
+		if (chain_step <0, fs...> (result, tokens, i))
+			return result;
+
+		i = old;
+
+		return std::nullopt;
+	}
+};
+
+// Options of parsers
+template <typename Token, parser_fn <Token> ... Fs>
+requires all_same <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>
+struct options_group {
+	using option_result_t = typename bestd::is_optional_base <typename signature <std::tuple_element_t <0, std::tuple <Fs...>>> ::result_t> ::inner_t;
 	
-	template <parser_fn <Token> ... Fs>
-	static auto &options(Fs &... fs) {
-		auto p = parser_options <Token, Fs...> (fs...);
-		using result_t = decltype(p)::result_t;
-		allocated <result_t> .emplace_back(p);
-		return allocated <result_t> .back();
+	template <size_t I, auto f, auto ... fs>
+	static bool options_step(option_result_t &result, const std::vector <Token> &tokens, size_t &i) {
+		auto fv = signature <decltype(f)> ::template replica <f> (tokens, i);
+		if (fv) {
+			result = fv.value();
+			return true;
+		}
+
+		if constexpr (sizeof...(fs) > 0)
+			return options_step <I + 1, fs...> (result, tokens, i);
+
+		return false;
 	}
 
-	template <bool EmptyOk, parser_fn <Token> F, parser_fn <Token> D>
-	static auto &loop(F &f, D &d) {
-		auto p = parser_loop <Token, F, EmptyOk, D> (f, d);
-		using result_t = decltype(p)::result_t;
-		allocated <result_t> .emplace_back(p);
-		return allocated <result_t> .back();
+	template <auto ... fs>
+	requires ((std::same_as <decltype(fs), Fs>) && ...)
+	static bestd::optional <option_result_t> options(const std::vector <Token> &tokens, size_t &i) {
+		size_t old = i;
+
+		option_result_t result;
+		if (options_step <0, fs...> (result, tokens, i))
+			return result;
+
+		i = old;
+
+		return std::nullopt;
 	}
 };
 
-template <typename T, size_t ... Is, typename A>
-T __construct(const A &arg)
+template <typename Token, auto ... fs>
+auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
+
+template <typename Token, auto ... fs>
+auto &options = options_group <Token, decltype(fs)...> ::template options <fs...>;
+
+template <typename R, typename I, size_t ... Is>
+bestd::optional <R> transform(const bestd::optional <I> &r)
 {
-	if constexpr (sizeof...(Is) > 0)
-		return T(arg);
-	else
-		return T();
+	if (r) {
+		auto v = r.value();
+		if constexpr (sizeof...(Is) > 0)
+			return R(std::get <Is> (v)...);
+		else
+			return R(v);
+	}
+
+	return std::nullopt;
 }
 
-// Utilities for functional approach
-template <typename T, size_t ... Is, typename ... Args>
-T __construct(const bestd::tuple <Args...> &arg)
-{
-	return T(std::get <Is> (arg)...);
-}
+template <invocable F>
+struct extension {};
 
-template <typename T, size_t ... Is>
-auto construct = [](const auto &arg)
-{
-	return __construct <T, Is...> (arg);
+template <optional_returner F>
+struct extension <F> {
+	using inner_t = typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t;
+
+	// For non-tuple types
+	template <auto f, typename T, size_t ... Is>
+	static constexpr auto convert = compose <transform <T, inner_t, Is...>, f>;
 };
 
-template <typename T, size_t ... Is>
-auto feed_construct = [](const auto &arg)
-{
-	return arg.feed(construct <T, Is...>);
-};
-
-template <typename F, typename G>
-constexpr auto compose(const F &f, const G &g)
-{
-	return [f, g](auto &&... args) -> decltype(auto) {
-        	return std::invoke(f, std::invoke(g, std::forward <decltype(args)> (args)...));
-	};
-}
-
-template <typename T, size_t ... Is, typename G>
-constexpr auto constructor(const G &g)
-{
-	return compose(feed_construct <T, Is...>, g);
-}
+template <auto f, typename T, size_t ... Is>
+constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...>;
 
 }
