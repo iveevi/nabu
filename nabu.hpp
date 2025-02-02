@@ -324,11 +324,49 @@ struct options_group {
 	}
 };
 
+// Loops of parsers
+template <typename Token, parser_fn <Token> F, parser_fn <Token> D>
+struct loop_group {
+	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
+
+	template <auto f, auto d>
+	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
+	static bestd::optional <loop_result_t> loop(const std::vector <Token> &tokens, size_t &i) {
+		static constexpr bool EmptyOk = true;
+
+		size_t old = i;
+
+		loop_result_t result;
+
+		while (true) {
+			auto fv = signature <F> ::template replica <f> (tokens, i);
+			if (!fv) {
+				if (result.empty() && EmptyOk)
+					break;
+
+				i = old;
+				return std::nullopt;
+			}
+
+			result.push_back(fv.value());
+
+			auto dv = signature <D> ::template replica <d> (tokens, i);
+			if (!dv)
+				break;
+		}
+
+		return result;
+	}
+};
+
 template <typename Token, auto ... fs>
 auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
 
 template <typename Token, auto ... fs>
 auto &options = options_group <Token, decltype(fs)...> ::template options <fs...>;
+
+template <typename Token, auto f, auto d>
+auto &loop = loop_group <Token, decltype(f), decltype(d)> ::template loop <f, d>;
 
 template <typename R, typename I, size_t ... Is>
 bestd::optional <R> transform(const bestd::optional <I> &r)
@@ -358,5 +396,28 @@ struct extension <F> {
 
 template <auto f, typename T, size_t ... Is>
 constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...>;
+	
+template <typename Token, typename T>
+using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &);
 
 }
+
+// Importing symbols to active namespace
+#define NABU_UTILITIES(Token)					\
+	template <typename T>					\
+	constexpr auto singlet = nabu::singlet <Token, T>;	\
+								\
+	template <auto ... fs>					\
+	auto &chain = nabu::chain <Token, fs...>;		\
+								\
+	template <auto ... fs>					\
+	auto &options = nabu::options <Token, fs...>;		\
+								\
+	template <auto f, auto d>				\
+	auto &loop = nabu::loop <Token, f, d>;			\
+								\
+	template <auto f, typename T, size_t ... Is>		\
+	auto &convert = nabu::convert <f, T, Is...>;		\
+								\
+	template <typename T>					\
+	using production = nabu::production <Token, T>;
