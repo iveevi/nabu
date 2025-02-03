@@ -11,6 +11,37 @@
 
 namespace nabu {
 
+// Special optional with semantic difference
+template <typename T>
+struct maybe_ext : bestd::optional <T> {
+	using bestd::optional <T> ::optional;
+};
+
+template <typename T>
+struct is_maybe_ext_base : std::false_type {};
+
+template <typename T>
+struct is_maybe_ext_base <maybe_ext <T>> : std::true_type {};
+
+
+template <typename T>
+concept is_maybe_ext = is_maybe_ext_base <T> ::value;
+
+}
+
+namespace bestd {
+
+// Value preserving...
+template <typename T>
+struct is_optional_base <nabu::maybe_ext <T>> : std::true_type {
+	// ... so inner is same type
+	using inner_t = nabu::maybe_ext <T>;
+};
+
+}
+
+namespace nabu {
+
 // Space of acceptable functions
 template <typename T>
 struct signature : std::false_type {};
@@ -283,6 +314,22 @@ bestd::optional <T> singlet(const std::vector <Token> &tokens, size_t &i)
 	return tokens[i++].template as <T> ();
 }
 
+// Possibility of parser
+template <typename Token, parser_fn <Token> F>
+struct maybe_atom {
+	using direct_t = typename signature <F> ::result_t;
+	using result_t = typename bestd::is_optional_base <direct_t> ::inner_t;
+
+	template <auto f>
+	static maybe_ext <result_t> maybe(const std::vector <Token> &tokens, size_t &i) {
+		auto v = signature <F> ::template replica <f> (tokens, i);
+		if (!v)
+			return std::nullopt;
+
+		return v.value();
+	}
+};
+
 // Sequences of parsers
 template <bestd::is_variant Token, parser_fn <Token> ... Fs>
 struct chain_group {
@@ -291,10 +338,21 @@ struct chain_group {
 	template <size_t I, auto f, auto ... fs>
 	static bool chain_step(chain_result_t &result, const std::vector <Token> &tokens, size_t &i) {
 		auto fv = signature <decltype(f)> ::template replica <f> (tokens, i);
-		if (!fv)
-			return false;
 
-		std::get <I> (result) = fv.value();
+		using R = decltype(fv);
+
+		if constexpr (is_maybe_ext <R>) {
+			// Failure is OK
+			if (fv)
+				std::get <I> (result) = fv.value();
+		} else {
+			// Failure means failrue
+			if (!fv)
+				return false;
+
+			std::get <I> (result) = fv.value();
+		}
+		
 		if constexpr (sizeof...(fs) > 0)
 			return chain_step <I + 1, fs...> (result, tokens, i);
 
@@ -417,6 +475,9 @@ struct loop_group <Token, F, D, EmptyOk> {
 	}
 };
 
+template <typename Token, auto f>
+auto &maybe = maybe_atom <Token, decltype(f)> ::template maybe <f>;
+
 template <bestd::is_variant Token, auto ... fs>
 auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
 
@@ -464,6 +525,9 @@ using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &
 #define NABU_UTILITIES(Token)					\
 	template <typename T>					\
 	constexpr auto singlet = nabu::singlet <Token, T>;	\
+								\
+	template <auto ... fs>					\
+	auto &maybe = nabu::maybe <Token, fs...>;		\
 								\
 	template <auto ... fs>					\
 	auto &chain = nabu::chain <Token, fs...>;		\
