@@ -312,7 +312,7 @@ template <bestd::is_variant Token, typename T>
 requires (Token::template type_index <T> () >= 0)
 bestd::optional <T> singlet(const std::vector <Token> &tokens, size_t &i)
 {
-	if (!tokens[i].template is <T> ())
+	if (i >= tokens.size() || !tokens[i].template is <T> ())
 		return std::nullopt;
 
 	return tokens[i++].template as <T> ();
@@ -708,6 +708,21 @@ bestd::optional <Container> identifier(const std::string &source, size_t &i)
 	i = j;
 
 	return Container(id);
+}
+
+template <typename Container>
+bestd::optional <Container> double_quote_string(const std::string &source, size_t &i)
+{
+	if (source[i] == '\"') {
+		std::string result;
+		while (source[++i] != '\"')
+			result += source[i];
+		i++;
+
+		return Container(result);
+	}
+
+	return std::nullopt;
 }
 
 } // namespace nabu
