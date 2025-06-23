@@ -453,6 +453,7 @@ struct loop_group <Token, F, D, EmptyOk> {
 	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
 	static bestd::optional <loop_result_t> loop(const std::vector <Token> &tokens, size_t &i) {
 		size_t old = i;
+		size_t last = i;
 
 		loop_result_t result;
 
@@ -464,10 +465,12 @@ struct loop_group <Token, F, D, EmptyOk> {
 					return std::nullopt;
 				}
 
+				i = last;
 				break;
 			}
 
 			result.push_back(fv.value());
+			last = i;
 
 			// With delimeter
 			auto dv = signature <D> ::template replica <d> (tokens, i);
