@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <charconv>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,7 +28,7 @@ struct is_maybe_ext_base <maybe_ext <T>> : std::true_type {};
 template <typename T>
 concept is_maybe_ext = is_maybe_ext_base <T> ::value;
 
-}
+} // namespace nabu
 
 namespace bestd {
 
@@ -38,7 +39,7 @@ struct is_optional_base <nabu::maybe_ext <T>> : std::true_type {
 	using inner_t = nabu::maybe_ext <T>;
 };
 
-}
+} // namespace bestd
 
 namespace nabu {
 
@@ -522,7 +523,7 @@ constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...
 template <bestd::is_variant Token, typename T>
 using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &);
 
-}
+} // namespace nabu
 
 // Importing symbols to active namespace
 #define NABU_UTILITIES(Token)					\
@@ -546,3 +547,167 @@ using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &
 								\
 	template <typename T>					\
 	using production = nabu::production <Token, T>;
+
+namespace nabu {
+
+// Standard collection of lexers
+template <size_t Slot>
+bestd::optional <nabu::null <Slot>> whitespace(const std::string &source, size_t &i)
+{
+	if (std::isspace(source[i])) {
+		i++;
+		return nabu::null <Slot> ();
+	}
+
+	return std::nullopt;
+}
+
+template <size_t Slot>
+bestd::optional <nabu::null <Slot>> cpp_inline_comment(const std::string &source, size_t &i)
+{
+	if (source[i] == '/' && source[i + 1] == '/') {
+		i += 2;
+		while (source[i++] != '\n') {}
+		return nabu::null <Slot> ();
+	}
+
+	return std::nullopt;
+}
+
+template <size_t Slot>
+bestd::optional <nabu::null <Slot>> cpp_block_comment(const std::string &source, size_t &i)
+{
+	if (source[i] == '/' && source[i + 1] == '*') {
+		i += 2;
+		while (true) {
+			if (source[i] == '*' && source[i + 1] == '/') {
+				i += 2;
+				break;
+			} else {
+				i++;
+			}
+		}
+
+		return nabu::null <Slot> ();
+	}
+
+	return std::nullopt;
+}
+
+template <std::integral Integer>
+bestd::optional <Integer> integer(const std::string &source, size_t &i)
+{
+	size_t start = i;
+
+	const size_t n = source.size();
+	if (start >= n || !std::isdigit(source[start]))
+		return std::nullopt;
+	
+	size_t j = start;
+	while (j < n && std::isdigit(source[j]))
+		j++;
+
+	Integer value = 0;
+	auto first = source.data() + start;
+	auto last = source.data() + j;
+	auto result = std::from_chars(first, last, value);
+
+	if (result.ec == std::errc()) {
+		i = j;
+		return value;
+	} else {
+		// Overflow or other error: treat as lex failure
+		return std::nullopt;
+	}
+}
+
+template <std::floating_point Floating>
+bestd::optional <Floating> floating(const std::string &source, size_t &i)
+{
+	size_t start = i;
+	const size_t n = source.size();
+	size_t j = start;
+
+	bool saw_digit_before_dot = false;
+	bool saw_dot = false;
+	bool saw_digit_after_dot = false;
+	bool saw_exponent = false;
+	bool saw_digit_in_exponent = false;
+
+	while (j < n && std::isdigit(source[j])) {
+		saw_digit_before_dot = true;
+		j++;
+	}
+
+	if (j < n && source[j] == '.') {
+		saw_dot = true;
+		j++;
+
+		while (j < n && std::isdigit(source[j])) {
+			saw_digit_after_dot = true;
+			j++;
+		}
+	}
+
+	// Do not conflict with integers...
+	if (!saw_dot || (!saw_digit_before_dot && !saw_digit_after_dot))
+		return std::nullopt;
+
+	if (j < n && (source[j] == 'e' || source[j] == 'E')) {
+		saw_exponent = true;
+		size_t exp_pos = j++;
+		if (j < n && (source[j] == '+' || source[j] == '-'))
+			j++;
+
+		size_t exp_digits_start = j;
+		while (j < n && std::isdigit(source[j])) {
+			saw_digit_in_exponent = true;
+			j++;
+		}
+
+		if (!saw_digit_in_exponent) {
+			j = exp_pos;
+			saw_exponent = false;
+		}
+	}
+
+	const char *first = source.data() + start;
+	const char *last = source.data() + j;
+	Floating value = 0.0;
+
+	std::from_chars_result result = std::from_chars(first, last, value);
+	if (result.ec == std::errc()) {
+		i = j;
+		return value;
+	} else {
+		return std::nullopt;
+	}
+}
+
+template <typename Container>
+bestd::optional <Container> identifier(const std::string &source, size_t &i)
+{
+	size_t j = i;
+
+	std::string id;
+	
+	char c = source[j];
+	if (std::isalpha(c) || c == '_')
+		id += c;
+	else
+		return std::nullopt;
+
+	while (true) {
+		c = source[++j];
+		if (std::isalpha(c) || std::isdigit(c) || c == '_')
+			id += c;
+		else
+			break;
+	}
+
+	i = j;
+
+	return Container(id);
+}
+
+} // namespace nabu
