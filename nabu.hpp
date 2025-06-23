@@ -271,12 +271,15 @@ struct lexer_group {
 		}
 	}
 
-	bestd::optional <result_t> operator()(const std::string &s, size_t &i) const {
+	bestd::optional <result_t> operator()(const std::string &s, size_t &i, bool failok = false) const {
 		size_t old = i;
 
 		result_t result;
 
 		while (eval_i <0> (result, s, i)) {}
+
+		if (failok)
+			return result;
 
 		if (i == s.size())
 			return result;
