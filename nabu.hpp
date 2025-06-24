@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -589,8 +590,8 @@ auto &options = options_group <Token, decltype(fs)...> ::template options <fs...
 template <bestd::is_variant Token, auto f, auto d, size_t min>
 auto &loop = loop_group <Token, decltype(f), decltype(d), min> ::template loop <f, d>;
 
-template <typename R, typename I, size_t ... Is>
-bestd::optional <R> transform(const bestd::optional <I> &r)
+template <typename R, typename T, size_t ... Is>
+bestd::optional <R> transform(const bestd::optional <T> &r)
 {
 	if (r) {
 		auto v = r.value();
@@ -603,6 +604,21 @@ bestd::optional <R> transform(const bestd::optional <I> &r)
 	return std::nullopt;
 }
 
+template <typename T, size_t I>
+auto select(const bestd::optional <T> &r)
+{
+	using U = std::decay_t <decltype(r.value())> ::standard;
+	using V = std::tuple_element_t <I, U>;
+	using R = bestd::optional <V>;
+
+	if (r) {
+		auto v = r.value();
+		return R(std::get <I> (v));
+	}
+
+	return R(std::nullopt);
+}
+
 template <invocable F>
 struct extension {};
 
@@ -613,10 +629,16 @@ struct extension <F> {
 	// For non-tuple types
 	template <auto f, typename T, size_t ... Is>
 	static constexpr auto convert = compose <transform <T, inner_t, Is...>, f>;
+	
+	template <auto f, size_t I>
+	static constexpr auto pick = compose <select <inner_t, I>, f>;
 };
 
 template <auto f, typename T, size_t ... Is>
 constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...>;
+
+template <auto f, size_t I>
+constexpr auto pick = extension <decltype(f)> ::template pick <f, I>;
 	
 template <bestd::is_variant Token, typename T>
 using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
@@ -642,6 +664,9 @@ using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
 								\
 	template <auto f, typename T, size_t ... Is>		\
 	auto &convert = nabu::convert <f, T, Is...>;		\
+								\
+	template <auto f, size_t I>				\
+	auto &pick = nabu::pick <f, I>;				\
 								\
 	template <typename T>					\
 	using production = nabu::production <Token, T>;
