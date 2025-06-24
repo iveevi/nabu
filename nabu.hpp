@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <charconv>
+#include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <bestd/variant.hpp>
@@ -301,17 +303,96 @@ auto lexer(Fs &... args)
 // Parsing utilities //
 ///////////////////////
 
+#ifdef NABU_TRACE_PARSER
+#define TRACE_PRINT(...)	printf(__VA_ARGS__)
+#else
+#define TRACE_PRINT(...)
+#endif
+
+// Parsing context contains tokens and cached information
+using FunctionAddress = void *;
+using TableReference = std::shared_ptr <void>;
+
+template <bestd::is_variant Token>
+struct parsing_context : std::vector <Token> {
+	std::unordered_map <FunctionAddress, TableReference> tables;
+};
+
+// Acceptable parser function signatures
 template <typename F, typename Token>
 concept parser_fn = optional_returner <F>
 		&& bestd::is_variant <Token>
-		&& requires(F f, const std::vector <Token> &tokens, size_t &i) {
+		&& requires(F f, parsing_context <Token> &tokens, size_t &i) {
 	{ signature <F> ::accepts(tokens, i) };
 };
 
+// Memoization table structure
+template <typename Token, parser_fn <Token> F>
+struct memoization_table {
+	using T = bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t;
+
+	struct entry {
+		bool success;
+		size_t end;
+		T value;
+	};
+
+	std::unordered_map <size_t, entry> memoized;
+
+	bool contains(size_t begin) const {
+		return memoized.contains(begin);
+	}
+
+	bestd::optional <T> get(size_t begin, size_t &current) const {
+		auto entry = memoized.at(begin);
+		if (entry.success) {
+			current = entry.end;
+			return entry.value;
+		} else {
+			current = begin;
+			return std::nullopt;
+		}
+	}
+
+	const T &success(size_t begin, size_t end, const T &value) {
+		memoized.emplace(begin, entry(true, end, value));
+		return value;
+	}
+
+	std::nullopt_t fail(size_t begin, size_t &current) {
+		memoized.emplace(begin, entry(false, -1, T()));
+		current = begin;
+		return std::nullopt;
+	}
+};
+
+// Table access
+template <typename Token, parser_fn <Token> F>
+auto table_for(parsing_context <Token> &tokens, F *ptr)
+{
+	using table = memoization_table <Token, F>;
+
+	// Automatically construct the table
+	auto addr = FunctionAddress(ptr);
+
+	auto it = tokens.tables.find(addr);
+
+	if (it == tokens.tables.end()) {
+		auto ref = TableReference(new table());
+		tokens.tables.emplace(addr, ref);
+		it = tokens.tables.find(addr);
+	}
+
+	return reinterpret_cast <table *> (it->second.get());
+}
+
+// Terminal states
 template <bestd::is_variant Token, typename T>
 requires (Token::template type_index <T> () >= 0)
-bestd::optional <T> singlet(const std::vector <Token> &tokens, size_t &i)
+bestd::optional <T> singlet(parsing_context <Token> &tokens, size_t &i)
 {
+	TRACE_PRINT("(%p, %03d): singlet!\n", singlet <Token, T>, i);
+
 	if (i >= tokens.size() || !tokens[i].template is <T> ())
 		return std::nullopt;
 
@@ -325,7 +406,9 @@ struct maybe_atom {
 	using result_t = typename bestd::is_optional_base <direct_t> ::inner_t;
 
 	template <auto f>
-	static maybe_ext <result_t> maybe(const std::vector <Token> &tokens, size_t &i) {
+	static maybe_ext <result_t> maybe(parsing_context <Token> &tokens, size_t &i) {
+		TRACE_PRINT("(%p, %03d): maybe!\n", maybe <f>, i);
+
 		auto v = signature <F> ::template replica <f> (tokens, i);
 		if (!v)
 			return std::nullopt;
@@ -340,7 +423,7 @@ struct chain_group {
 	using chain_result_t = bestd::tuple <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	
 	template <size_t I, auto f, auto ... fs>
-	static bool chain_step(chain_result_t &result, const std::vector <Token> &tokens, size_t &i) {
+	static bool chain_step(chain_result_t &result, parsing_context <Token> &tokens, size_t &i) {
 		auto fv = signature <decltype(f)> ::template replica <f> (tokens, i);
 
 		using R = decltype(fv);
@@ -350,7 +433,7 @@ struct chain_group {
 			if (fv)
 				std::get <I> (result) = fv.value();
 		} else {
-			// Failure means failrue
+			// Failure means failure
 			if (!fv)
 				return false;
 
@@ -365,16 +448,23 @@ struct chain_group {
 
 	template <auto ... fs>
 	requires ((std::same_as <decltype(fs), Fs>) && ...)
-	static bestd::optional <chain_result_t> chain(const std::vector <Token> &tokens, size_t &i) {
+	static bestd::optional <chain_result_t> chain(parsing_context <Token> &tokens, size_t &i) {
+		TRACE_PRINT("(%p, %03d): chain!\n", chain <fs...>, i);
+
 		size_t old = i;
+
+		auto table = table_for(tokens, chain <fs...>);
+
+		if (table->contains(old)) {
+			TRACE_PRINT("\tcached entry!\n");
+			return table->get(old, i);
+		}
 
 		chain_result_t result;
 		if (chain_step <0, fs...> (result, tokens, i))
-			return result;
+			return table->success(old, i, result);
 
-		i = old;
-
-		return std::nullopt;
+		return table->fail(old, i);
 	}
 };
 
@@ -385,7 +475,7 @@ struct options_group {
 	using option_result_t = typename bestd::is_optional_base <typename signature <std::tuple_element_t <0, std::tuple <Fs...>>> ::result_t> ::inner_t;
 	
 	template <size_t I, auto f, auto ... fs>
-	static bool options_step(option_result_t &result, const std::vector <Token> &tokens, size_t &i) {
+	static bool options_step(option_result_t &result, parsing_context <Token> &tokens, size_t &i) {
 		auto fv = signature <decltype(f)> ::template replica <f> (tokens, i);
 		if (fv) {
 			result = fv.value();
@@ -400,7 +490,9 @@ struct options_group {
 
 	template <auto ... fs>
 	requires ((std::same_as <decltype(fs), Fs>) && ...)
-	static bestd::optional <option_result_t> options(const std::vector <Token> &tokens, size_t &i) {
+	static bestd::optional <option_result_t> options(parsing_context <Token> &tokens, size_t &i) {
+		TRACE_PRINT("(%p, %03d): option!\n", options <fs...>, i);
+
 		size_t old = i;
 
 		option_result_t result;
@@ -414,44 +506,47 @@ struct options_group {
 };
 
 // Loops of parsers
-template <bestd::is_variant Token, parser_fn <Token> F, typename D, bool EmptyOk>
+template <bestd::is_variant Token, parser_fn <Token> F, typename D, size_t Min>
 struct loop_group {
 	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
 
 	template <auto f, auto d>
 	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
-	static bestd::optional <loop_result_t> loop(const std::vector <Token> &tokens, size_t &i) {
+	static bestd::optional <loop_result_t> loop(parsing_context <Token> &tokens, size_t &i) {
+		TRACE_PRINT("(%p, %03d): loop (no delim)!\n", loop <f, d>, i);
+
 		size_t old = i;
 
 		loop_result_t result;
 
 		while (true) {
 			auto fv = signature <F> ::template replica <f> (tokens, i);
-			if (!fv) {
-				if (result.empty() && !EmptyOk) {
-					i = old;
-					return std::nullopt;
-				}
-
+			if (!fv)
 				break;
-			}
 
 			result.push_back(fv.value());
 			
 			// No delimeter
+		}
+				
+		if (result.size() < Min) {
+			i = old;
+			return std::nullopt;
 		}
 
 		return result;
 	}
 };
 
-template <bestd::is_variant Token, parser_fn <Token> F, parser_fn <Token> D, bool EmptyOk>
-struct loop_group <Token, F, D, EmptyOk> {
+template <bestd::is_variant Token, parser_fn <Token> F, parser_fn <Token> D, size_t Min>
+struct loop_group <Token, F, D, Min> {
 	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
 
 	template <auto f, auto d>
 	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
-	static bestd::optional <loop_result_t> loop(const std::vector <Token> &tokens, size_t &i) {
+	static bestd::optional <loop_result_t> loop(parsing_context <Token> &tokens, size_t &i) {
+		TRACE_PRINT("(%p, %03d): loop!\n", loop <f, d>, i);
+
 		size_t old = i;
 		size_t last = i;
 
@@ -460,11 +555,6 @@ struct loop_group <Token, F, D, EmptyOk> {
 		while (true) {
 			auto fv = signature <F> ::template replica <f> (tokens, i);
 			if (!fv) {
-				if (result.empty() && !EmptyOk) {
-					i = old;
-					return std::nullopt;
-				}
-
 				i = last;
 				break;
 			}
@@ -476,6 +566,11 @@ struct loop_group <Token, F, D, EmptyOk> {
 			auto dv = signature <D> ::template replica <d> (tokens, i);
 			if (!dv)
 				break;
+		}
+				
+		if (result.size() < Min) {
+			i = old;
+			return std::nullopt;
 		}
 
 		return result;
@@ -491,8 +586,8 @@ auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
 template <bestd::is_variant Token, auto ... fs>
 auto &options = options_group <Token, decltype(fs)...> ::template options <fs...>;
 
-template <bestd::is_variant Token, auto f, auto d, bool e>
-auto &loop = loop_group <Token, decltype(f), decltype(d), e> ::template loop <f, d>;
+template <bestd::is_variant Token, auto f, auto d, size_t min>
+auto &loop = loop_group <Token, decltype(f), decltype(d), min> ::template loop <f, d>;
 
 template <typename R, typename I, size_t ... Is>
 bestd::optional <R> transform(const bestd::optional <I> &r)
@@ -524,7 +619,7 @@ template <auto f, typename T, size_t ... Is>
 constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...>;
 	
 template <bestd::is_variant Token, typename T>
-using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &);
+using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
 
 } // namespace nabu
 
@@ -542,8 +637,8 @@ using production = bestd::optional <T> (*)(const std::vector <Token> &, size_t &
 	template <auto ... fs>					\
 	auto &options = nabu::options <Token, fs...>;		\
 								\
-	template <auto f, auto d, bool b>			\
-	auto &loop = nabu::loop <Token, f, d, b>;		\
+	template <auto f, auto d, size_t min>			\
+	auto &loop = nabu::loop <Token, f, d, min>;		\
 								\
 	template <auto f, typename T, size_t ... Is>		\
 	auto &convert = nabu::convert <f, T, Is...>;		\
