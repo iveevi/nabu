@@ -646,7 +646,7 @@ using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
 } // namespace nabu
 
 // Importing symbols to active namespace
-#define NABU_UTILITIES(Token)					\
+#define nabu_import_definitions(Token)				\
 	template <typename T>					\
 	constexpr auto singlet = nabu::singlet <Token, T>;	\
 								\
@@ -849,37 +849,3 @@ bestd::optional <Container> double_quote_string(const std::string &source, size_
 }
 
 } // namespace nabu
-
-namespace nabu {
-
-// Syntactic sugar
-template <auto f, bool Chain = false>
-struct ctime_wrapper {
-	static constexpr auto handle = f;
-	static constexpr bool chain = Chain;
-};
-
-struct ctime_handle {};
-
-template <typename T, size_t ... Is>
-struct convert_indicator {};
-
-template <auto f, typename T, size_t ... Is>
-constexpr auto operator%(ctime_wrapper <f>, convert_indicator <T, Is...>)
-{
-	constexpr auto ff = nabu::convert <f, T, Is...>;
-	return ctime_wrapper <ff> ();
-}
-
-template <auto f>
-constexpr auto operator<<(ctime_wrapper <f>, ctime_handle)
-{
-	return f;
-}
-
-} // namespace nabu
-
-#define pf(...)		nabu::ctime_wrapper <__VA_ARGS__> ()
-#define as(...)		% nabu::convert_indicator <__VA_ARGS__> ()
-#define as_finally(...)	% nabu::convert_indicator <__VA_ARGS__> () << nabu::ctime_handle()
-#define pf_chain(...)	pf(chain <__VA_ARGS__>)
