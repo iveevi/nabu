@@ -67,6 +67,14 @@ struct signature <R (Args...)> : std::true_type {
 		auto &fr = signature <decltype(f)> ::template replica <f>;
 		return fr(g(args...));
 	}
+	
+	template <auto a, auto b, R (*g)(Args...)>
+	static R wrap(Args ... args) {
+		a(args...);
+		R r = g(args...);
+		b(r, args...);
+		return r;
+	}
 
 	template <typename F>
 	static constexpr bool feedable() {
@@ -82,7 +90,7 @@ struct signature <R (*)(Args...)> : std::true_type {
 	static auto accepts(Args ... args) {}
 
 	template <R (*g)(Args...)>
-	static auto replica(Args ... args) {
+	static R replica(Args ... args) {
 		return g(args...);
 	}
 	
@@ -90,6 +98,14 @@ struct signature <R (*)(Args...)> : std::true_type {
 	static auto feed(Args ... args) {
 		auto &fr = signature <decltype(f)> ::template replica <f>;
 		return fr(g(args...));
+	}
+	
+	template <auto a, auto b, R (*g)(Args...)>
+	static R wrap(Args ... args) {
+		a(args...);
+		R r = g(args...);
+		b(r, args...);
+		return r;
 	}
 
 	template <typename F>
@@ -115,29 +131,13 @@ struct signature <R (**)(Args...)> : std::true_type {
 		auto &fr = signature <decltype(f)> ::template replica <f>;
 		return fr((*g)(args...));
 	}
-
-	template <typename F>
-	static constexpr bool feedable() {
-		return std::is_invocable_v <F, R>;
-	}
-};
-
-// Reference to pointer to function... :(
-template <typename R, typename ... Args>
-struct signature <R (**&)(Args...)> : std::true_type {
-	using result_t = R;
 	
-	static auto accepts(Args ... args) {}
-
-	template <R (**&g)(Args...)>
-	static auto replica(Args ... args) {
-		return (*g)(args...);
-	}
-	
-	template <auto f, R (**&g)(Args...)>
-	static auto feed(Args ... args) {
-		auto &fr = signature <decltype(f)> ::template replica <f>;
-		return fr((*g)(args...));
+	template <auto a, auto b, R (**g)(Args...)>
+	static R wrap(Args ... args) {
+		a(args...);
+		R r = (*g)(args...);
+		b(r, args...);
+		return r;
 	}
 
 	template <typename F>
@@ -156,6 +156,9 @@ template <auto f, auto g>
 requires composable <decltype(f), decltype(g)>
 auto &compose = signature <decltype(g)> ::template feed <f, g>;
 
+template <auto a, auto b, auto g>
+auto &wrap = signature <decltype(g)> ::template wrap <a, b, g>;
+
 template <typename F>
 concept optional_returner = invocable <F> && bestd::is_optional <typename signature <F> ::result_t>;
 
@@ -167,16 +170,16 @@ constexpr bool all_same = (sizeof...(Rest) == 0) || (std::is_same_v <T, Rest> ||
 //////////////////////
 
 template <size_t N>
-struct string_literal {
+struct cstring {
 	char value[N];
 
-	constexpr string_literal(const char (&str)[N]) {
+	constexpr cstring(const char (&str)[N]) {
 		std::copy_n(str, N, value);
 	}
 };
 
 template <size_t N>
-bestd::optional <std::string> raw_expanded(const string_literal <N> &raw, const std::string &source, size_t &i)
+bestd::optional <std::string> raw_expanded(const cstring <N> &raw, const std::string &source, size_t &i)
 {
 	for (size_t n = 0; n < N - 1; n++) {
 		if (source[n + i] != raw.value[n])
@@ -188,7 +191,7 @@ bestd::optional <std::string> raw_expanded(const string_literal <N> &raw, const 
 	return "?";
 }
 
-template <string_literal s, typename T>
+template <cstring s, typename T>
 bestd::optional <T> raw(const std::string &source, size_t &i)
 {
 	if (auto r = raw_expanded(s, source, i)) {
@@ -242,13 +245,10 @@ struct lexer_group {
 
 	std::tuple <const Fs &...> fs;
 
-	// TODO: variant...
 	using element_t = bestd::variant <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	using result_t = std::vector <element_t>;
 
 	lexer_group(const Fs &... fs_) : fs(fs_...) {}
-
-	// TODO: compare element index...
 
 	template <size_t I>
 	bool eval_i(result_t &result, const std::string &source, size_t &i) const {
@@ -304,19 +304,17 @@ auto lexer(Fs &... args)
 // Parsing utilities //
 ///////////////////////
 
-#ifdef NABU_TRACE_PARSER
-#define TRACE_PRINT(...)	printf(__VA_ARGS__)
-#else
-#define TRACE_PRINT(...)
-#endif
-
 // Parsing context contains tokens and cached information
 using FunctionAddress = void *;
 using TableReference = std::shared_ptr <void>;
 
 template <bestd::is_variant Token>
 struct parsing_context : std::vector <Token> {
+	using base = std::vector <Token>;
+
 	std::unordered_map <FunctionAddress, TableReference> tables;
+
+	parsing_context(const base &tokens) : base(tokens) {}
 };
 
 // Acceptable parser function signatures
@@ -392,8 +390,6 @@ template <bestd::is_variant Token, typename T>
 requires (Token::template type_index <T> () >= 0)
 bestd::optional <T> singlet(parsing_context <Token> &tokens, size_t &i)
 {
-	TRACE_PRINT("(%p, %03d): singlet!\n", singlet <Token, T>, i);
-
 	if (i >= tokens.size() || !tokens[i].template is <T> ())
 		return std::nullopt;
 
@@ -408,8 +404,6 @@ struct maybe_atom {
 
 	template <auto f>
 	static maybe_ext <result_t> maybe(parsing_context <Token> &tokens, size_t &i) {
-		TRACE_PRINT("(%p, %03d): maybe!\n", maybe <f>, i);
-
 		auto v = signature <F> ::template replica <f> (tokens, i);
 		if (!v)
 			return std::nullopt;
@@ -450,16 +444,11 @@ struct chain_group {
 	template <auto ... fs>
 	requires ((std::same_as <decltype(fs), Fs>) && ...)
 	static bestd::optional <chain_result_t> chain(parsing_context <Token> &tokens, size_t &i) {
-		TRACE_PRINT("(%p, %03d): chain!\n", chain <fs...>, i);
-
 		size_t old = i;
 
 		auto table = table_for(tokens, chain <fs...>);
-
-		if (table->contains(old)) {
-			TRACE_PRINT("\tcached entry!\n");
+		if (table->contains(old))
 			return table->get(old, i);
-		}
 
 		chain_result_t result;
 		if (chain_step <0, fs...> (result, tokens, i))
@@ -492,17 +481,17 @@ struct options_group {
 	template <auto ... fs>
 	requires ((std::same_as <decltype(fs), Fs>) && ...)
 	static bestd::optional <option_result_t> options(parsing_context <Token> &tokens, size_t &i) {
-		TRACE_PRINT("(%p, %03d): option!\n", options <fs...>, i);
-
 		size_t old = i;
+
+		auto table = table_for(tokens, options <fs...>);
+		if (table->contains(old))
+			return table->get(old, i);
 
 		option_result_t result;
 		if (options_step <0, fs...> (result, tokens, i))
-			return result;
+			return table->success(old, i, result);
 
-		i = old;
-
-		return std::nullopt;
+		return table->fail(old, i);
 	}
 };
 
@@ -514,8 +503,6 @@ struct loop_group {
 	template <auto f, auto d>
 	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
 	static bestd::optional <loop_result_t> loop(parsing_context <Token> &tokens, size_t &i) {
-		TRACE_PRINT("(%p, %03d): loop (no delim)!\n", loop <f, d>, i);
-
 		size_t old = i;
 
 		loop_result_t result;
@@ -546,8 +533,6 @@ struct loop_group <Token, F, D, Min> {
 	template <auto f, auto d>
 	requires (std::same_as <decltype(f), F>) && (std::same_as <decltype(d), D>)
 	static bestd::optional <loop_result_t> loop(parsing_context <Token> &tokens, size_t &i) {
-		TRACE_PRINT("(%p, %03d): loop!\n", loop <f, d>, i);
-
 		size_t old = i;
 		size_t last = i;
 
@@ -619,27 +604,94 @@ auto select(const bestd::optional <T> &r)
 	return R(std::nullopt);
 }
 
-template <invocable F>
-struct extension {};
+// Debugging the parsing process
+static thread_local bool debugger_enabled = false;
+static thread_local uint32_t debugger_nesting = 0;
+static thread_local std::optional <size_t> debugger_silenced;
 
-template <optional_returner F>
-struct extension <F> {
+inline void debugger(bool b)
+{
+	debugger_enabled = b;
+}
+
+template <typename Token, cstring name, bool silence>
+void debugger_head(const parsing_context <Token> &, const size_t &i)
+{
+	if (!debugger_enabled)
+		return;
+
+	debugger_nesting++;
+	if (!debugger_silenced) {
+		std::string indents(4 * (debugger_nesting - 1), ' ');
+		for (uint32_t i = 0; i + 1 < debugger_nesting; i++)
+			indents[4 * i] = '|';
+		printf("%s[%s] @%zu\n",
+			indents.c_str(),
+			name.value, i);
+
+		if constexpr (silence)
+			debugger_silenced = debugger_nesting;
+	}
+}
+
+template <typename Token, typename R, cstring name, bool silence>
+void debugger_tail(const std::optional <R> &r, const parsing_context <Token> &, const size_t &i)
+{
+	if (!debugger_enabled)
+		return;
+
+	bool display = false;
+	if (!debugger_silenced) {
+		display = true;
+	} else if (debugger_nesting <= debugger_silenced.value()) {
+		debugger_silenced.reset();
+		display = true;
+	}
+
+	debugger_nesting--;
+	if (display) {
+		std::string indents(4 * debugger_nesting, ' ');
+		for (uint32_t i = 0; i < debugger_nesting; i++)
+			indents[4 * i] = '|';
+		if (r)
+			printf("%s+-(success)-> @%zu\n", indents.c_str(), i);
+		else
+			printf("%s+-(fail)-> @%zu\n", indents.c_str(), i);
+
+		printf("%s\n", indents.c_str());
+	}
+}
+
+// Manifesting derivative functions of parsers
+template <typename Token, parser_fn <Token> F>
+struct extension {
 	using inner_t = typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t;
 
 	// For non-tuple types
-	template <auto f, typename T, size_t ... Is>
-	static constexpr auto convert = compose <transform <T, inner_t, Is...>, f>;
+	template <auto parser, typename T, size_t ... Is>
+	static constexpr auto convert = compose <transform <T, inner_t, Is...>, parser>;
 	
-	template <auto f, size_t I>
-	static constexpr auto pick = compose <select <inner_t, I>, f>;
+	template <auto parser, size_t I>
+	static constexpr auto pick = compose <select <inner_t, I>, parser>;
+
+	// For debugging
+	template <auto parser, cstring name, bool silence>
+	static constexpr auto debug = wrap <
+		debugger_head <Token, name, silence>,
+		debugger_tail <Token, inner_t, name, silence>,
+		parser
+	>;
 };
 
-template <auto f, typename T, size_t ... Is>
-constexpr auto convert = extension <decltype(f)> ::template convert <f, T, Is...>;
+template <typename Token, auto f, typename T, size_t ... Is>
+constexpr auto convert = extension <Token, decltype(f)> ::template convert <f, T, Is...>;
 
-template <auto f, size_t I>
-constexpr auto pick = extension <decltype(f)> ::template pick <f, I>;
-	
+template <typename Token, auto f, size_t I>
+constexpr auto pick = extension <Token, decltype(f)> ::template pick <f, I>;
+
+template <typename Token, auto f, cstring name, bool silence>
+constexpr auto debug = extension <Token, decltype(f)> ::template debug <f, name, silence>;
+
 template <bestd::is_variant Token, typename T>
 using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
 
@@ -663,12 +715,15 @@ using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
 	auto &loop = nabu::loop <Token, f, d, min>;		\
 								\
 	template <auto f, typename T, size_t ... Is>		\
-	auto &convert = nabu::convert <f, T, Is...>;		\
+	auto &convert = nabu::convert <Token, f, T, Is...>;	\
 								\
 	template <auto f, size_t I>				\
-	auto &pick = nabu::pick <f, I>;				\
-								\
-	template <typename T>					\
+	auto &pick = nabu::pick <Token, f, I>;				\
+									\
+	template <auto f, nabu::cstring name, bool silence = false>	\
+	auto &debug = nabu::debug <Token, f, name, silence>;		\
+									\
+	template <typename T>						\
 	using production = nabu::production <Token, T>;
 
 namespace nabu {
