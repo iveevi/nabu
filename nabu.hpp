@@ -605,9 +605,9 @@ auto select(const bestd::optional <T> &r)
 }
 
 // Debugging the parsing process
-static thread_local bool debugger_enabled = false;
-static thread_local uint32_t debugger_nesting = 0;
-static thread_local std::optional <size_t> debugger_silenced;
+inline thread_local bool debugger_enabled = false;
+inline thread_local uint32_t debugger_nesting = 0;
+inline thread_local std::optional <size_t> debugger_silenced;
 
 inline void debugger(bool b)
 {
@@ -625,27 +625,30 @@ void debugger_head(const parsing_context <Token> &, const size_t &i)
 		std::string indents(4 * (debugger_nesting - 1), ' ');
 		for (uint32_t i = 0; i + 1 < debugger_nesting; i++)
 			indents[4 * i] = '|';
-		printf("%s[%s] @%zu\n",
+		printf("%s[%s: @%zu]%c",
 			indents.c_str(),
-			name.value, i);
+			name.value, i,
+			silence ? ' ' : '\n');
 
 		if constexpr (silence)
 			debugger_silenced = debugger_nesting;
 	}
 }
 
-template <typename Token, typename R, cstring name, bool silence>
+template <typename Token, typename R, cstring name>
 void debugger_tail(const std::optional <R> &r, const parsing_context <Token> &, const size_t &i)
 {
 	if (!debugger_enabled)
 		return;
 
 	bool display = false;
+	bool outnow = false;
 	if (!debugger_silenced) {
 		display = true;
 	} else if (debugger_nesting <= debugger_silenced.value()) {
 		debugger_silenced.reset();
 		display = true;
+		outnow = true;
 	}
 
 	debugger_nesting--;
@@ -653,10 +656,12 @@ void debugger_tail(const std::optional <R> &r, const parsing_context <Token> &, 
 		std::string indents(4 * debugger_nesting, ' ');
 		for (uint32_t i = 0; i < debugger_nesting; i++)
 			indents[4 * i] = '|';
+
+		std::string actual = outnow ? "" : indents;
 		if (r)
-			printf("%s+-(success)-> @%zu\n", indents.c_str(), i);
+			printf("%s[success: @%zu]\n", actual.c_str(), i);
 		else
-			printf("%s+-(fail)-> @%zu\n", indents.c_str(), i);
+			printf("%s[failure: @%zu]\n", actual.c_str(), i);
 
 		printf("%s\n", indents.c_str());
 	}
@@ -678,7 +683,7 @@ struct extension {
 	template <auto parser, cstring name, bool silence>
 	static constexpr auto debug = wrap <
 		debugger_head <Token, name, silence>,
-		debugger_tail <Token, inner_t, name, silence>,
+		debugger_tail <Token, inner_t, name>,
 		parser
 	>;
 };
