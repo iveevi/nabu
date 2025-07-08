@@ -239,6 +239,29 @@ constexpr bool valid_lexer_group()
 	return !has_duplicates <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...> ();
 }
 
+// Token with source range
+struct token_check_t {};
+
+struct range_t {
+	size_t begin;
+	size_t end;
+};
+
+template <typename ... Ts>
+struct token_t : bestd::variant <Ts...> {
+	using Super = bestd::variant <Ts...>;
+	using Super::Super;
+
+	range_t row;
+	range_t column;
+
+	using check = token_check_t;
+};
+
+// Token concept
+template <typename T>
+concept is_token = std::same_as <typename T::check, token_check_t>;
+
 template <lexer_fn ... Fs>
 struct lexer_group {
 	static_assert(valid_lexer_group <Fs...> (),
@@ -247,13 +270,16 @@ struct lexer_group {
 
 	std::tuple <const Fs &...> fs;
 
-	using element_t = bestd::variant <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
+	// TODO: result_t should include source information...
+	// maybe return a parsing context?
+	using element_t = token_t <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	using result_t = std::vector <element_t>;
+	using line_table_t = std::vector <size_t>;
 
 	lexer_group(const Fs &... fs_) : fs(fs_...) {}
 
 	template <size_t I>
-	bool eval_i(result_t &result, const std::string &source, size_t &i) const {
+	bool eval_i(result_t &result, const std::string &source, const line_table_t &table, size_t &prev, size_t &i) const {
 		size_t old = i;
 
 		if constexpr (I >= sizeof...(Fs)) {
@@ -264,8 +290,22 @@ struct lexer_group {
 				auto fvv = fv.value();
 
 				using T = decltype(fvv);
-				if (!is_null <T> ::value)
-					result.push_back(fv.value());
+				if (!is_null <T> ::value) {
+					element_t token = fvv;
+
+					auto begin = line_table_get(table, prev);
+					token.row.begin = begin.first;
+					token.column.begin = begin.second;
+
+					auto end = line_table_get(table, i - 1);
+					token.row.end = end.first;
+					token.column.end = end.second;
+
+					result.push_back(token);
+				}
+
+				// Update previous to current
+				prev = old;
 
 				return true;
 			}
@@ -273,16 +313,16 @@ struct lexer_group {
 			// Reset for the next case...
 			i = old;
 
-			return eval_i <I + 1> (result, source, i);
+			return eval_i <I + 1> (result, source, table, prev, i);
 		}
 	}
 
 	bestd::optional <result_t> operator()(const std::string &s, size_t &i, bool failok = false) const {
 		size_t old = i;
-
+		size_t prev = i;
 		result_t result;
-
-		while (eval_i <0> (result, s, i)) {}
+		line_table_t table = line_table(s);
+		while (eval_i <0> (result, s, table, prev, i)) {}
 
 		if (failok)
 			return result;
@@ -293,6 +333,30 @@ struct lexer_group {
 		i = old;
 
 		return std::nullopt;
+	}
+
+	static line_table_t line_table(const std::string &s) {
+		line_table_t table;
+		for (size_t i = 0; i < s.size(); i++) {
+			if (s[i] == '\n')
+				table.push_back(i);
+		}
+
+		if (s.back() != '\n')
+			table.push_back(s.size() - 1);
+
+		return table;
+	}
+
+	static std::pair <size_t, size_t> line_table_get(const line_table_t &table, size_t idx) {
+		for (size_t i = 0; i < table.size(); i++) {
+			if (table[i] >= idx) {
+				size_t begin = (i > 0) ? table[i - 1] : 0;
+				return std::make_pair(i + 1, idx - begin + 1);
+			}
+		}
+
+		return std::make_pair(-1, -1);
 	}
 };
 
@@ -310,7 +374,7 @@ auto lexer(Fs &... args)
 using FunctionAddress = void *;
 using TableReference = std::shared_ptr <void>;
 
-template <bestd::is_variant Token>
+template <is_token Token>
 struct parsing_context : std::vector <Token> {
 	using base = std::vector <Token>;
 
@@ -322,13 +386,13 @@ struct parsing_context : std::vector <Token> {
 // Acceptable parser function signatures
 template <typename F, typename Token>
 concept parser_fn = optional_returner <F>
-		&& bestd::is_variant <Token>
+		&& is_token <Token>
 		&& requires(F f, parsing_context <Token> &tokens, size_t &i) {
 	{ signature <F> ::accepts(tokens, i) };
 };
 
 // Memoization table structure
-template <typename Token, parser_fn <Token> F>
+template <is_token Token, parser_fn <Token> F>
 struct memoization_table {
 	using T = bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t;
 
@@ -368,7 +432,7 @@ struct memoization_table {
 };
 
 // Table access
-template <typename Token, parser_fn <Token> F>
+template <is_token Token, parser_fn <Token> F>
 auto table_for(parsing_context <Token> &tokens, F *ptr)
 {
 	using table = memoization_table <Token, F>;
@@ -388,7 +452,7 @@ auto table_for(parsing_context <Token> &tokens, F *ptr)
 }
 
 // Terminal states
-template <bestd::is_variant Token, typename T>
+template <is_token Token, typename T>
 requires (Token::template type_index <T> () >= 0)
 bestd::optional <T> singlet(parsing_context <Token> &tokens, size_t &i)
 {
@@ -415,7 +479,7 @@ struct maybe_atom {
 };
 
 // Sequences of parsers
-template <bestd::is_variant Token, parser_fn <Token> ... Fs>
+template <is_token Token, parser_fn <Token> ... Fs>
 struct chain_group {
 	using chain_result_t = bestd::tuple <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>;
 	
@@ -461,7 +525,7 @@ struct chain_group {
 };
 
 // Options of parsers
-template <bestd::is_variant Token, parser_fn <Token> ... Fs>
+template <is_token Token, parser_fn <Token> ... Fs>
 requires all_same <typename bestd::is_optional_base <typename signature <Fs> ::result_t> ::inner_t...>
 struct options_group {
 	using option_result_t = typename bestd::is_optional_base <typename signature <std::tuple_element_t <0, std::tuple <Fs...>>> ::result_t> ::inner_t;
@@ -498,7 +562,7 @@ struct options_group {
 };
 
 // Loops of parsers
-template <bestd::is_variant Token, parser_fn <Token> F, typename D, size_t Min>
+template <is_token Token, parser_fn <Token> F, typename D, size_t Min>
 struct loop_group {
 	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
 
@@ -528,7 +592,7 @@ struct loop_group {
 	}
 };
 
-template <bestd::is_variant Token, parser_fn <Token> F, parser_fn <Token> D, size_t Min>
+template <is_token Token, parser_fn <Token> F, parser_fn <Token> D, size_t Min>
 struct loop_group <Token, F, D, Min> {
 	using loop_result_t = std::vector <typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t>;
 
@@ -568,13 +632,13 @@ struct loop_group <Token, F, D, Min> {
 template <typename Token, auto f>
 auto &maybe = maybe_atom <Token, decltype(f)> ::template maybe <f>;
 
-template <bestd::is_variant Token, auto ... fs>
+template <is_token Token, auto ... fs>
 auto &chain = chain_group <Token, decltype(fs)...> ::template chain <fs...>;
 
-template <bestd::is_variant Token, auto ... fs>
+template <is_token Token, auto ... fs>
 auto &options = options_group <Token, decltype(fs)...> ::template options <fs...>;
 
-template <bestd::is_variant Token, auto f, auto d, size_t min>
+template <is_token Token, auto f, auto d, size_t min>
 auto &loop = loop_group <Token, decltype(f), decltype(d), min> ::template loop <f, d>;
 
 template <typename R, typename T, size_t ... Is>
@@ -670,7 +734,7 @@ void debugger_tail(const std::optional <R> &r, const parsing_context <Token> &, 
 }
 
 // Manifesting derivative functions of parsers
-template <typename Token, parser_fn <Token> F>
+template <is_token Token, parser_fn <Token> F>
 struct extension {
 	using inner_t = typename bestd::is_optional_base <typename signature <F> ::result_t> ::inner_t;
 
@@ -699,7 +763,7 @@ constexpr auto pick = extension <Token, decltype(f)> ::template pick <f, I>;
 template <typename Token, auto f, cstring name, bool silence>
 constexpr auto debug = extension <Token, decltype(f)> ::template debug <f, name, silence>;
 
-template <bestd::is_variant Token, typename T>
+template <is_token Token, typename T>
 using production = bestd::optional <T> (*)(parsing_context <Token> &, size_t &);
 
 } // namespace nabu
