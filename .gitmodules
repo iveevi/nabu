@@ -1,3 +1,6 @@
 [submodule "bestd"]
 	path = bestd
 	url = https://github.com/iveevi/bestd.git
+[submodule "fast_float"]
+	path = fast_float
+	url = https://github.com/fastfloat/fast_float.git

@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <fast_float/include/fast_float/fast_float.h>
+
 #include <bestd/variant.hpp>
 #include <bestd/optional.hpp>
 #include <bestd/tuple.hpp>
@@ -856,9 +858,9 @@ bestd::optional <Floating> floating(const std::string &source, size_t &i)
 
 	const char *first = source.data() + start;
 	const char *last = source.data() + j;
-	Floating value = 0.0;
+	float value = 0.0;
 
-	std::from_chars_result result = std::from_chars(first, last, value);
+	fast_float::from_chars_result result = fast_float::from_chars(first, last, value);
 	if (result.ec == std::errc()) {
 		i = j;
 		return value;
